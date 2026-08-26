@@ -3,47 +3,22 @@
 #include <iostream>
 
 #include "portui/debug.hpp"
-#include "portui/snapshot.hpp"
+#include "portui/scanner.hpp"
 
 namespace portui {
-namespace {
-
-Snapshot BuildBootstrapSnapshot() {
-  Snapshot snapshot{
-      .captured_at = std::chrono::system_clock::now(),
-      .entries = {
-          SocketEntry{
-              .pid = 101,
-              .process_name = "bootstrap-listener",
-              .port = 3000,
-              .protocol = Protocol::kTcp,
-              .state = SocketState::kListen,
-          },
-          SocketEntry{
-              .pid = 202,
-              .process_name = "bootstrap-client",
-              .port = 8080,
-              .protocol = Protocol::kTcp,
-              .state = SocketState::kEstablished,
-          },
-      },
-  };
-
-  return snapshot;
-}
-
-}  // namespace
 
 int RunApp(std::span<const std::string_view> args) {
-  const Snapshot snapshot = BuildBootstrapSnapshot();
+  auto scanner = CreateSerialScanner();
 
-  if (!args.empty() && args.front() == "--debug-snapshot") {
+  if (!args.empty() &&
+      (args.front() == "--debug-snapshot" || args.front() == "--scan")) {
+    const Snapshot snapshot = scanner->Scan();
     std::cout << FormatSnapshotForDebug(snapshot);
     return 0;
   }
 
-  std::cout << "porTUI phase 0 scaffold ready.\n";
-  std::cout << "Run with --debug-snapshot to inspect the bootstrap data model.\n";
+  std::cout << "porTUI phase 1 scaffold ready.\n";
+  std::cout << "Run with --scan to print a serial socket snapshot.\n";
   return 0;
 }
 
