@@ -9,6 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_executable(portui
   src/main.cpp
   src/app.cpp
+  src/core/debug.cpp
 )
 
 target_include_directories(portui
