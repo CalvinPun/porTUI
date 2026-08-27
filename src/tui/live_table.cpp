@@ -183,6 +183,26 @@ class LiveTable {
         }
         return true;
       }
+      if (sort_menu_) {
+        if (event == Event::ArrowUp) {
+          sort_menu_row_ = std::max(0, sort_menu_row_ - 1);
+          return true;
+        }
+        if (event == Event::ArrowDown) {
+          sort_menu_row_ = std::min(sort_menu_row_ + 1, static_cast<int>(SortMode::kCount) - 1);
+          return true;
+        }
+        if (event == Event::Return) {
+          ApplySortMode(static_cast<SortMode>(sort_menu_row_));
+          sort_menu_ = false;
+          return true;
+        }
+        if (event == Event::Escape || event == Event::s || event == Event::S) {
+          sort_menu_ = false;
+          return true;
+        }
+        return true;
+      }
       if (event == Event::ArrowUp) {
         selected_row_ = std::max(0, selected_row_ - 1);
         return true;
@@ -214,6 +234,11 @@ class LiveTable {
         }
         return true;
       }
+      if (event == Event::s || event == Event::S) {
+        sort_menu_row_ = static_cast<int>(sort_mode_);
+        sort_menu_ = true;
+        return true;
+      }
       if (event == Event::Character('?')) {
         show_help_ = !show_help_;
         return true;
@@ -233,6 +258,15 @@ class LiveTable {
   }
 
  private:
+  enum class SortMode {
+    kName,
+    kCpu,
+    kRam,
+    kPortCount,
+    kListenerCount,
+    kCount,
+  };
+
   struct ProcessGroup {
     int pid = -1;
     std::string process_name;
@@ -277,6 +311,68 @@ class LiveTable {
     return {first_group, std::min(groups_.size(), first_group + kVisibleGroupLimit)};
   }
 
+  static std::string SortModeName(SortMode mode) {
+    switch (mode) {
+      case SortMode::kName:
+        return "Process name";
+      case SortMode::kCpu:
+        return "CPU usage";
+      case SortMode::kRam:
+        return "RAM usage";
+      case SortMode::kPortCount:
+        return "Port count";
+      case SortMode::kListenerCount:
+        return "Listener count";
+      case SortMode::kCount:
+        break;
+    }
+    return "Process name";
+  }
+
+  void SortGroups() {
+    std::sort(groups_.begin(), groups_.end(), [this](const ProcessGroup& lhs, const ProcessGroup& rhs) {
+      switch (sort_mode_) {
+        case SortMode::kCpu:
+          if (lhs.cpu_percent != rhs.cpu_percent) return lhs.cpu_percent > rhs.cpu_percent;
+          break;
+        case SortMode::kRam:
+          if (lhs.resident_bytes != rhs.resident_bytes) return lhs.resident_bytes > rhs.resident_bytes;
+          break;
+        case SortMode::kPortCount:
+          if (CountUniquePorts(lhs.sockets) != CountUniquePorts(rhs.sockets)) {
+            return CountUniquePorts(lhs.sockets) > CountUniquePorts(rhs.sockets);
+          }
+          break;
+        case SortMode::kListenerCount: {
+          const auto listener_count = [](const ProcessGroup& group) {
+            return std::count_if(group.sockets.begin(), group.sockets.end(), [](const SocketEntry& entry) {
+              return entry.state == SocketState::kListen;
+            });
+          };
+          if (listener_count(lhs) != listener_count(rhs)) return listener_count(lhs) > listener_count(rhs);
+          break;
+        }
+        case SortMode::kName:
+        case SortMode::kCount:
+          break;
+      }
+      if (lhs.process_name != rhs.process_name) return lhs.process_name < rhs.process_name;
+      return lhs.pid < rhs.pid;
+    });
+  }
+
+  void ApplySortMode(SortMode mode) {
+    const int focused_pid = groups_.empty() ? -1 : groups_[selected_row_].pid;
+    sort_mode_ = mode;
+    SortGroups();
+    const auto focused = std::find_if(groups_.begin(), groups_.end(), [focused_pid](const ProcessGroup& group) {
+      return group.pid == focused_pid;
+    });
+    if (focused != groups_.end()) {
+      selected_row_ = static_cast<int>(std::distance(groups_.begin(), focused));
+    }
+  }
+
   void BuildGroups() {
     groups_.clear();
     for (const SocketEntry& entry : entries_) {
@@ -298,10 +394,7 @@ class LiveTable {
         group.resident_bytes = usage->resident_bytes;
       }
     }
-    std::sort(groups_.begin(), groups_.end(), [](const ProcessGroup& lhs, const ProcessGroup& rhs) {
-      if (lhs.process_name != rhs.process_name) return lhs.process_name < rhs.process_name;
-      return lhs.pid < rhs.pid;
-    });
+    SortGroups();
   }
 
   bool GroupHasEntries(
@@ -337,6 +430,7 @@ class LiveTable {
       return;
     }
 
+    const int focused_pid = groups_.empty() ? -1 : groups_[selected_row_].pid;
     captured_at_ = update->snapshot.captured_at;
     ++scan_generation_;
     entries_ = update->snapshot.entries;
@@ -376,7 +470,12 @@ class LiveTable {
     for (const SocketEntry& entry : update->diff.changed) {
       changed_highlights_[EntryKey(entry)] = expires_at;
     }
-    if (groups_.empty()) {
+    const auto focused = std::find_if(groups_.begin(), groups_.end(), [focused_pid](const ProcessGroup& group) {
+      return group.pid == focused_pid;
+    });
+    if (focused != groups_.end()) {
+      selected_row_ = static_cast<int>(std::distance(groups_.begin(), focused));
+    } else if (groups_.empty()) {
       selected_row_ = 0;
     } else {
       selected_row_ = std::min(selected_row_, static_cast<int>(groups_.size() - 1));
@@ -493,7 +592,7 @@ class LiveTable {
                                "  socket owners: " + std::to_string(groups_.size()) +
                                "  sockets: " + std::to_string(entries_.size()) +
                                "  selected: " + std::to_string(selected_pids_.size());
-    const std::string controls = "up/down: move  enter: ports  space: select  k: terminate  ?: help  q: quit";
+    const std::string controls = "up/down: move  enter: ports  s: sort  space: select  k: terminate  ?: help  q: quit";
     const std::string usage_summary = has_snapshot_
                                           ? "TOTAL CPU: " + FormatPercent(total_cpu_percent_) +
                                                 "  PROCESS RSS: " +
@@ -510,9 +609,23 @@ class LiveTable {
                        bold | color(Color::Red));
     }
     if (show_help_) {
-      footer.push_back(text("KEYS  up/down: focus  enter: show ports  space: select  k: SIGTERM") |
+      footer.push_back(text("KEYS  up/down: focus  enter: show ports  s: sort  space: select  k: SIGTERM") |
                        color(Color::Cyan));
       footer.push_back(text("      y/n: confirm or cancel  ?: close help  q: quit") | color(Color::Cyan));
+    }
+    if (sort_menu_) {
+      footer.push_back(text("SORT BY  up/down: choose  enter: apply  esc: cancel") | color(Color::Cyan));
+      for (int index = 0; index < static_cast<int>(SortMode::kCount); ++index) {
+        const SortMode mode = static_cast<SortMode>(index);
+        Element option = text(std::string(index == sort_menu_row_ ? "> " : "  ") +
+                              SortModeName(mode));
+        if (index == sort_menu_row_) {
+          option = option | bold | color(Color::White) | bgcolor(Color::Blue);
+        } else if (mode == sort_mode_) {
+          option = option | color(Color::GreenLight);
+        }
+        footer.push_back(std::move(option));
+      }
     }
     for (const std::string& status : status_lines_) {
       footer.push_back(text(status) | dim);
@@ -559,6 +672,9 @@ class LiveTable {
   bool confirm_kill_ = false;
   bool confirm_force_kill_ = false;
   bool show_help_ = false;
+  SortMode sort_mode_ = SortMode::kName;
+  bool sort_menu_ = false;
+  int sort_menu_row_ = 0;
   int selected_row_ = 0;
 };
 
