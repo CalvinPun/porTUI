@@ -12,6 +12,7 @@
 #include "portui/debug.hpp"
 #include "portui/scanner.hpp"
 #include "portui/snapshot_pipeline.hpp"
+#include "portui/tui.hpp"
 
 namespace portui {
 namespace {
@@ -91,6 +92,10 @@ int RunApp(std::span<const std::string_view> args) {
     return 0;
   }
 
+  if (args.empty() || args.front() == "--tui") {
+    return RunTui();
+  }
+
   if (!args.empty() &&
       (args.front() == "--debug-snapshot" || args.front() == "--scan" ||
        args.front() == "--parallel-scan")) {
@@ -102,10 +107,11 @@ int RunApp(std::span<const std::string_view> args) {
     return 0;
   }
 
-  std::cout << "porTUI phase 3 scaffold ready.\n";
+  std::cout << "porTUI phase 4 scaffold ready.\n";
   std::cout << "Run with --scan to print a serial socket snapshot.\n";
   std::cout << "Run with --parallel-scan or --benchmark to exercise concurrent scanning.\n";
   std::cout << "Run with --watch to print background scan updates and diffs.\n";
+  std::cout << "Run with --tui to launch the interactive port monitor.\n";
   return 0;
 }
 
