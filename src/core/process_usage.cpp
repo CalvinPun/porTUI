@@ -18,6 +18,11 @@ namespace portui::detail {
 void PopulateProcessUsage(Snapshot* snapshot) {
   std::size_t memory_size = sizeof(snapshot->system_memory_bytes);
   sysctlbyname("hw.memsize", &snapshot->system_memory_bytes, &memory_size, nullptr, 0);
+  std::size_t cpu_count_size = sizeof(snapshot->logical_cpu_count);
+  if (sysctlbyname("hw.logicalcpu", &snapshot->logical_cpu_count, &cpu_count_size, nullptr, 0) != 0 ||
+      snapshot->logical_cpu_count == 0) {
+    snapshot->logical_cpu_count = 1;
+  }
   static std::unordered_map<int, std::pair<std::uint64_t, std::chrono::steady_clock::time_point>> previous;
   const auto now = std::chrono::steady_clock::now();
   std::unordered_map<int, std::pair<std::uint64_t, std::chrono::steady_clock::time_point>> next;

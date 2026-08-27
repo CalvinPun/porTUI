@@ -10,8 +10,10 @@
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <iomanip>
 #include <numeric>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -68,6 +70,38 @@ std::string FormatRam(std::uint64_t bytes, std::uint64_t total_bytes) {
     return FormatBytes(bytes);
   }
   return FormatBytes(bytes) + " / " + FormatBytes(total_bytes);
+}
+
+std::string FormatPercent(double value) {
+  std::ostringstream output;
+  output << std::fixed << std::setprecision(1) << value << "%";
+  return output.str();
+}
+
+std::string FormatPorts(const std::vector<SocketEntry>& sockets) {
+  std::vector<std::uint16_t> ports;
+  ports.reserve(sockets.size());
+  for (const SocketEntry& socket : sockets) {
+    ports.push_back(socket.port);
+  }
+  std::sort(ports.begin(), ports.end());
+  ports.erase(std::unique(ports.begin(), ports.end()), ports.end());
+  if (ports.empty()) {
+    return "-";
+  }
+
+  constexpr std::size_t kShownPortLimit = 3;
+  std::string result;
+  for (std::size_t index = 0; index < std::min(ports.size(), kShownPortLimit); ++index) {
+    if (!result.empty()) {
+      result += ",";
+    }
+    result += std::to_string(ports[index]);
+  }
+  if (ports.size() > kShownPortLimit) {
+    result += " +" + std::to_string(ports.size() - kShownPortLimit);
+  }
+  return result;
 }
 
 Element Cell(const std::string& value, int width) {
@@ -185,6 +219,14 @@ class LiveTable {
     }
   }
 
+  std::pair<std::size_t, std::size_t> VisibleGroupRange() const {
+    constexpr std::size_t kVisibleGroupLimit = 16;
+    const std::size_t first_group = selected_row_ > static_cast<int>(kVisibleGroupLimit / 2)
+                                        ? static_cast<std::size_t>(selected_row_ - kVisibleGroupLimit / 2)
+                                        : 0;
+    return {first_group, std::min(groups_.size(), first_group + kVisibleGroupLimit)};
+  }
+
   void BuildGroups() {
     groups_.clear();
     for (const SocketEntry& entry : entries_) {
@@ -238,8 +280,17 @@ class LiveTable {
     entries_ = update->snapshot.entries;
     usage_ = update->snapshot.process_usage;
     system_memory_bytes_ = update->snapshot.system_memory_bytes;
+    logical_cpu_count_ = update->snapshot.logical_cpu_count;
     scanned_process_count_ = update->snapshot.scanned_process_count;
     has_snapshot_ = true;
+    total_cpu_percent_ = 0.0;
+    total_resident_bytes_ = 0;
+    for (const ProcessUsage& usage : usage_) {
+      total_cpu_percent_ += usage.cpu_percent;
+      total_resident_bytes_ += usage.resident_bytes;
+    }
+    total_cpu_percent_ = std::min(100.0, total_cpu_percent_ /
+                                             static_cast<double>(std::max(1U, logical_cpu_count_)));
     BuildGroups();
     std::erase_if(selected_pids_, [this](int pid) {
       return std::none_of(groups_.begin(), groups_.end(), [pid](const ProcessGroup& group) {
@@ -269,9 +320,9 @@ class LiveTable {
 
   Element Render() const {
     Elements rows;
-    rows.push_back(hbox({Cell("SEL", 5), Cell("PID", 8), Cell("PROCESS", 22),
-                         Cell("SOCKETS", 10), Cell("LISTEN", 9), Cell("CPU", 8),
-                         Cell("RAM / SYS", 22)}) |
+    rows.push_back(hbox({Cell("SEL", 6), Cell("PID", 8), Cell("PROCESS", 17),
+                         Cell("PORTS", 16), Cell("LISTEN", 9), Cell("CPU", 8),
+                         Cell("RAM / SYS", 15)}) |
                    bold | color(Color::Cyan));
     rows.push_back(separator());
 
@@ -281,11 +332,7 @@ class LiveTable {
       rows.push_back(text("No IPv4/IPv6 sockets found in the latest scan.") | dim);
     }
 
-    constexpr std::size_t kVisibleGroupLimit = 16;
-    const std::size_t first_group = selected_row_ > static_cast<int>(kVisibleGroupLimit / 2)
-                                        ? static_cast<std::size_t>(selected_row_ - kVisibleGroupLimit / 2)
-                                        : 0;
-    const std::size_t last_group = std::min(groups_.size(), first_group + kVisibleGroupLimit);
+    const auto [first_group, last_group] = VisibleGroupRange();
     if (first_group > 0) {
       rows.push_back(text("... " + std::to_string(first_group) + " processes above") | dim);
     }
@@ -295,12 +342,12 @@ class LiveTable {
           group.sockets.begin(), group.sockets.end(), [](const SocketEntry& entry) {
             return entry.state == SocketState::kListen;
           });
-      const std::string cpu = std::to_string(group.cpu_percent).substr(0, 5) + "%";
+      const std::string cpu = FormatPercent(group.cpu_percent);
       const std::string ram = FormatRam(group.resident_bytes, system_memory_bytes_);
-      Element row = hbox({Cell(selected_pids_.contains(group.pid) ? "[x]" : "[ ]", 5),
-                          Cell(std::to_string(group.pid), 8), Cell(group.process_name, 22),
-                          Cell(std::to_string(group.sockets.size()), 10),
-                          Cell(std::to_string(listener_count), 9), Cell(cpu, 8), Cell(ram, 22)});
+      Element row = hbox({Cell(selected_pids_.contains(group.pid) ? "[x]" : "[ ]", 6),
+                          Cell(std::to_string(group.pid), 8), Cell(group.process_name, 17),
+                          Cell(FormatPorts(group.sockets), 16),
+                          Cell(std::to_string(listener_count), 9), Cell(cpu, 8), Cell(ram, 15)});
       if (static_cast<int>(index) == selected_row_) {
         row = row | bgcolor(Color::Blue) | color(Color::White);
       } else if (GroupHasEntries(group, added_keys_)) {
@@ -341,11 +388,21 @@ class LiveTable {
       }
     }
 
-    const std::string summary = "scanned: " + std::to_string(scanned_process_count_) +
+    const std::string focused = groups_.empty()
+                                    ? "none"
+                                    : groups_[selected_row_].process_name + " (" +
+                                          std::to_string(groups_[selected_row_].pid) + ")";
+    const std::string summary = "focused: " + focused +
+                                "  scanned: " + std::to_string(scanned_process_count_) +
                                 "  socket owners: " + std::to_string(groups_.size()) +
                                 "  sockets: " + std::to_string(entries_.size()) +
-                                "  selected: " + std::to_string(selected_pids_.size()) +
-                                "  up/down: move  enter: ports  space: select  k: terminate  q: quit";
+                                "  selected: " + std::to_string(selected_pids_.size());
+    const std::string controls = "up/down: move  enter: ports  space: select  k: terminate  q: quit";
+    const std::string usage_summary = has_snapshot_
+                                          ? "TOTAL CPU: " + FormatPercent(total_cpu_percent_) +
+                                                "  PROCESS RSS: " +
+                                                FormatRam(total_resident_bytes_, system_memory_bytes_)
+                                          : "TOTAL CPU: gathering...  PROCESS RSS: gathering...";
     Elements footer;
     if (confirm_kill_) {
       footer.push_back(text("Send SIGTERM to " + std::to_string(pending_kill_pids_.size()) +
@@ -356,7 +413,9 @@ class LiveTable {
       footer.push_back(text(status) | dim);
     }
     footer.push_back(text(summary) | dim);
-    return vbox({text("porTUI  LIVE PORT MONITOR") | bold | color(Color::Green), separator(),
+    footer.push_back(text(controls) | dim);
+    return vbox({text("porTUI  LIVE PORT MONITOR") | bold | color(Color::Green),
+                 text(usage_summary) | bold | color(Color::Cyan), separator(),
                  vbox(std::move(rows)) | flex, separator(), vbox(std::move(footer))}) |
            border;
   }
@@ -366,6 +425,9 @@ class LiveTable {
   std::chrono::system_clock::time_point captured_at_{};
   std::size_t scanned_process_count_ = 0;
   std::uint64_t system_memory_bytes_ = 0;
+  std::uint32_t logical_cpu_count_ = 1;
+  double total_cpu_percent_ = 0.0;
+  std::uint64_t total_resident_bytes_ = 0;
   bool has_snapshot_ = false;
   std::vector<SocketEntry> entries_;
   std::vector<ProcessUsage> usage_;
