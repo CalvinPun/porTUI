@@ -97,6 +97,27 @@ std::size_t CountUniquePorts(const std::vector<SocketEntry>& sockets) {
   return ports.size();
 }
 
+Color CpuColor(double percent) {
+  if (percent >= 80.0) return Color::RedLight;
+  if (percent >= 30.0) return Color::YellowLight;
+  return Color::GreenLight;
+}
+
+Color RamColor(std::uint64_t resident_bytes, std::uint64_t system_memory_bytes) {
+  if (system_memory_bytes == 0) return Color::GrayLight;
+  const double fraction = static_cast<double>(resident_bytes) /
+                          static_cast<double>(system_memory_bytes);
+  if (fraction >= 0.15) return Color::RedLight;
+  if (fraction >= 0.05) return Color::YellowLight;
+  return Color::GreenLight;
+}
+
+Color StateColor(std::size_t listener_count, std::size_t established_count) {
+  if (listener_count > 0) return Color::GreenLight;
+  if (established_count > 0) return Color::CyanLight;
+  return Color::GrayDark;
+}
+
 Element Cell(const std::string& value, int width) {
   std::string display = value;
   const std::size_t max_content_width = static_cast<std::size_t>(std::max(0, width - 1));
@@ -317,6 +338,7 @@ class LiveTable {
     }
 
     captured_at_ = update->snapshot.captured_at;
+    ++scan_generation_;
     entries_ = update->snapshot.entries;
     usage_ = update->snapshot.process_usage;
     system_memory_bytes_ = update->snapshot.system_memory_bytes;
@@ -363,9 +385,9 @@ class LiveTable {
 
   Element Render() const {
     Elements rows;
-    rows.push_back(hbox({Cell("SEL", 6), Cell("PID", 8), Cell("PROCESS", 17),
-                         Cell("PORTS", 10), Cell("LISTEN", 9), Cell("CPU", 8),
-                         Cell("RAM / SYS", 21)}) |
+    rows.push_back(hbox({Cell("SEL", 6), Cell("PID", 7), Cell("PROCESS", 16),
+                         Cell("PORTS", 10), Cell("LISTEN", 8), Cell("CPU", 7),
+                         Cell("RAM / SYS", 18)}) |
                    bold | color(Color::Cyan));
     rows.push_back(separator());
 
@@ -385,18 +407,31 @@ class LiveTable {
           group.sockets.begin(), group.sockets.end(), [](const SocketEntry& entry) {
             return entry.state == SocketState::kListen;
           });
+      const std::size_t established_count = std::count_if(
+          group.sockets.begin(), group.sockets.end(), [](const SocketEntry& entry) {
+            return entry.state == SocketState::kEstablished;
+          });
       const std::string cpu = FormatPercent(group.cpu_percent);
       const std::string ram = FormatRam(group.resident_bytes, system_memory_bytes_);
+      const bool low_signal = listener_count == 0 && established_count == 0 &&
+                              group.cpu_percent < 0.1;
       Element row = hbox({Cell(selected_pids_.contains(group.pid) ? "[x]" : "[ ]", 6),
-                          Cell(std::to_string(group.pid), 8), Cell(group.process_name, 17),
+                          Cell(std::to_string(group.pid), 7), Cell(group.process_name, 16),
                           Cell(std::to_string(CountUniquePorts(group.sockets)) + " ports", 10),
-                          Cell(std::to_string(listener_count), 9), Cell(cpu, 8), Cell(ram, 21)});
+                          Cell(std::to_string(listener_count), 8) |
+                              color(StateColor(listener_count, established_count)),
+                          Cell(cpu, 7) | color(CpuColor(group.cpu_percent)),
+                          Cell(ram, 18) | color(RamColor(group.resident_bytes, system_memory_bytes_))});
       if (static_cast<int>(index) == selected_row_) {
         row = row | bgcolor(Color::Blue) | color(Color::White);
       } else if (GroupHasEntries(group, added_highlights_)) {
-        row = row | color(Color::Green);
+        row = row | bgcolor(Color::RGB(0, 55, 0));
       } else if (GroupHasEntries(group, changed_highlights_)) {
-        row = row | color(Color::Yellow);
+        row = row | bgcolor(Color::RGB(65, 50, 0));
+      } else if (low_signal) {
+        row = row | dim;
+      } else if (index % 2 == 1) {
+        row = row | bgcolor(Color::RGB(20, 28, 32));
       }
       rows.push_back(row);
     }
@@ -429,6 +464,23 @@ class LiveTable {
                          dim);
         }
       }
+    } else if (!groups_.empty()) {
+      const ProcessGroup& focused_group = groups_[selected_row_];
+      const std::size_t listener_count = std::count_if(
+          focused_group.sockets.begin(), focused_group.sockets.end(), [](const SocketEntry& entry) {
+            return entry.state == SocketState::kListen;
+          });
+      const std::size_t established_count = std::count_if(
+          focused_group.sockets.begin(), focused_group.sockets.end(), [](const SocketEntry& entry) {
+            return entry.state == SocketState::kEstablished;
+          });
+      rows.push_back(separator());
+      rows.push_back(text("FOCUSED  " + focused_group.process_name + " (PID " +
+                          std::to_string(focused_group.pid) + ")  " +
+                          std::to_string(CountUniquePorts(focused_group.sockets)) + " ports  " +
+                          std::to_string(listener_count) + " listening  " +
+                          std::to_string(established_count) + " established") |
+                     dim);
     }
 
     const std::string focused = groups_.empty()
@@ -436,11 +488,11 @@ class LiveTable {
                                     : groups_[selected_row_].process_name + " (" +
                                           std::to_string(groups_[selected_row_].pid) + ")";
     const std::string summary = "focused: " + focused +
-                                "  scan: " + FormatDuration(scan_duration_) + " parallel" +
-                                "  scanned: " + std::to_string(scanned_process_count_) +
-                                "  socket owners: " + std::to_string(groups_.size()) +
-                                "  sockets: " + std::to_string(entries_.size()) +
-                                "  selected: " + std::to_string(selected_pids_.size());
+                                "  scan: " + FormatDuration(scan_duration_) + " parallel";
+    const std::string counts = "scanned: " + std::to_string(scanned_process_count_) +
+                               "  socket owners: " + std::to_string(groups_.size()) +
+                               "  sockets: " + std::to_string(entries_.size()) +
+                               "  selected: " + std::to_string(selected_pids_.size());
     const std::string controls = "up/down: move  enter: ports  space: select  k: terminate  ?: help  q: quit";
     const std::string usage_summary = has_snapshot_
                                           ? "TOTAL CPU: " + FormatPercent(total_cpu_percent_) +
@@ -466,10 +518,20 @@ class LiveTable {
       footer.push_back(text(status) | dim);
     }
     footer.push_back(text(summary) | dim);
+    footer.push_back(text(counts) | dim);
     footer.push_back(text(controls) | dim);
-    return vbox({text("porTUI  LIVE PORT MONITOR") | bold | color(Color::Green),
+    const char spinner[] = {'|', '/', '-', '\\'};
+    const std::string header = " porTUI [" + std::string(1, spinner[scan_generation_ % 4]) +
+                               "] LIVE PORT MONITOR  last scan: " +
+                               std::to_string(has_snapshot_
+                                                  ? std::chrono::duration_cast<std::chrono::seconds>(
+                                                        std::chrono::system_clock::now() - captured_at_)
+                                                        .count()
+                                                  : 0) +
+                               "s";
+    return vbox({text(header) | bold | color(Color::Green),
                  text(usage_summary) | bold | color(Color::Cyan), separator(),
-                 vbox(std::move(rows)) | flex, separator(), vbox(std::move(footer))}) |
+                 vbox(std::move(rows)), separator(), vbox(std::move(footer))}) |
            border;
   }
 
@@ -483,6 +545,7 @@ class LiveTable {
   double total_cpu_percent_ = 0.0;
   std::uint64_t total_resident_bytes_ = 0;
   bool has_snapshot_ = false;
+  std::size_t scan_generation_ = 0;
   std::vector<SocketEntry> entries_;
   std::vector<ProcessUsage> usage_;
   std::vector<ProcessGroup> groups_;
