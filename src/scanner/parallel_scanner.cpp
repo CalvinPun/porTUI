@@ -48,6 +48,7 @@ class ParallelScanner final : public Scanner {
   }
 
   Snapshot Scan() override {
+    const auto scan_started_at = std::chrono::steady_clock::now();
     Snapshot snapshot;
     snapshot.captured_at = std::chrono::system_clock::now();
     std::vector<int> pids = detail::ListAllPids();
@@ -71,7 +72,8 @@ class ParallelScanner final : public Scanner {
                               std::make_move_iterator(entries.end()));
     }
     detail::FinalizeSnapshot(&snapshot);
-    detail::AppendLsofFallback(&snapshot);
+    snapshot.scan_duration = std::chrono::steady_clock::now() - scan_started_at;
+    fallback_cache_.AppendTo(&snapshot);
     detail::FinalizeSnapshot(&snapshot);
     return snapshot;
   }
@@ -122,6 +124,7 @@ class ParallelScanner final : public Scanner {
   std::size_t completed_workers_ = 0;
   std::vector<int> scan_pids_;
   std::vector<std::vector<SocketEntry>> worker_entries_;
+  detail::LsofFallbackCache fallback_cache_;
 };
 
 }  // namespace

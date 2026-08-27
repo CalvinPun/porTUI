@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <sstream>
@@ -78,11 +79,11 @@ bool HasSocket(const Snapshot& snapshot, const SocketEntry& candidate) {
 
 }  // namespace
 
-void AppendLsofFallback(Snapshot* snapshot) {
+std::vector<SocketEntry> CollectLsofFallback() {
   constexpr char kCommand[] = "/usr/sbin/lsof -n -P -i";
   std::FILE* pipe = popen(kCommand, "r");
   if (pipe == nullptr) {
-    return;
+    return {};
   }
 
   Snapshot fallback;
@@ -131,11 +132,33 @@ void AppendLsofFallback(Snapshot* snapshot) {
   pclose(pipe);
 
   FinalizeSnapshot(&fallback);
-  for (const SocketEntry& entry : fallback.entries) {
+  return fallback.entries;
+}
+
+void AppendFallbackEntries(Snapshot* snapshot, const std::vector<SocketEntry>& entries) {
+  for (const SocketEntry& entry : entries) {
     if (!HasSocket(*snapshot, entry)) {
       snapshot->entries.push_back(entry);
     }
   }
+}
+
+void AppendLsofFallback(Snapshot* snapshot) {
+  AppendFallbackEntries(snapshot, CollectLsofFallback());
+}
+
+void LsofFallbackCache::AppendTo(Snapshot* snapshot) {
+  constexpr auto kRefreshInterval = std::chrono::seconds(5);
+  const auto now = std::chrono::steady_clock::now();
+  if (last_refresh_ == std::chrono::steady_clock::time_point{} ||
+      now - last_refresh_ >= kRefreshInterval) {
+    const auto refresh_started_at = now;
+    entries_ = CollectLsofFallback();
+    snapshot->lsof_refresh_duration = std::chrono::steady_clock::now() - refresh_started_at;
+    snapshot->lsof_refreshed = true;
+    last_refresh_ = std::chrono::steady_clock::now();
+  }
+  AppendFallbackEntries(snapshot, entries_);
 }
 
 }  // namespace portui::detail

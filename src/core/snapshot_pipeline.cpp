@@ -59,10 +59,8 @@ std::optional<SnapshotUpdate> SnapshotPipeline::Latest() const {
 void SnapshotPipeline::Run() {
   std::optional<Snapshot> previous;
   while (true) {
-    const auto scan_started_at = std::chrono::steady_clock::now();
     Snapshot snapshot = scanner_->Scan();
     detail::PopulateProcessUsage(&snapshot);
-    snapshot.scan_duration = std::chrono::steady_clock::now() - scan_started_at;
     DiffResult diff;
     if (previous.has_value()) {
       diff = DiffSnapshots(*previous, snapshot);

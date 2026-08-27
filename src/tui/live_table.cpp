@@ -630,6 +630,8 @@ class LiveTable {
     system_memory_bytes_ = update->snapshot.system_memory_bytes;
     logical_cpu_count_ = update->snapshot.logical_cpu_count;
     scan_duration_ = update->snapshot.scan_duration;
+    lsof_refresh_duration_ = update->snapshot.lsof_refresh_duration;
+    lsof_refreshed_ = update->snapshot.lsof_refreshed;
     scanned_process_count_ = update->snapshot.scanned_process_count;
     has_snapshot_ = true;
     total_cpu_percent_ = 0.0;
@@ -776,8 +778,11 @@ class LiveTable {
                                     ? "none"
                                     : groups_[selected_row_].process_name + " (" +
                                           std::to_string(groups_[selected_row_].pid) + ")";
+    const std::string fallback_status = lsof_refreshed_
+                                            ? "lsof: " + FormatDuration(lsof_refresh_duration_)
+                                            : "lsof: cached";
     const std::string summary = "  focused: " + focused +
-                                "  scan: " + FormatDuration(scan_duration_) + " parallel";
+                                "  native: " + FormatDuration(scan_duration_) + "  " + fallback_status;
     const std::string counts = "  scanned: " + std::to_string(scanned_process_count_) +
                                "  socket owners: " + std::to_string(groups_.size()) +
                                "  sockets: " + std::to_string(entries_.size()) +
@@ -866,6 +871,8 @@ class LiveTable {
   std::uint64_t system_memory_bytes_ = 0;
   std::uint32_t logical_cpu_count_ = 1;
   std::chrono::nanoseconds scan_duration_{};
+  std::chrono::nanoseconds lsof_refresh_duration_{};
+  bool lsof_refreshed_ = false;
   double total_cpu_percent_ = 0.0;
   std::uint64_t total_resident_bytes_ = 0;
   std::deque<double> cpu_history_;

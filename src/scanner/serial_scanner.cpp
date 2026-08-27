@@ -2,6 +2,7 @@
 
 #include "scanner_support.hpp"
 
+#include <chrono>
 #include <memory>
 
 namespace portui {
@@ -10,6 +11,7 @@ namespace {
 class SerialScanner final : public Scanner {
  public:
   Snapshot Scan() override {
+    const auto scan_started_at = std::chrono::steady_clock::now();
     Snapshot snapshot;
     snapshot.captured_at = std::chrono::system_clock::now();
 
@@ -22,11 +24,15 @@ class SerialScanner final : public Scanner {
                               std::make_move_iterator(pid_entries.end()));
     }
     detail::FinalizeSnapshot(&snapshot);
-    detail::AppendLsofFallback(&snapshot);
+    snapshot.scan_duration = std::chrono::steady_clock::now() - scan_started_at;
+    fallback_cache_.AppendTo(&snapshot);
     detail::FinalizeSnapshot(&snapshot);
 
     return snapshot;
   }
+
+ private:
+  detail::LsofFallbackCache fallback_cache_;
 };
 
 }  // namespace

@@ -1,9 +1,11 @@
 #include "portui/app.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <iostream>
 #include <memory>
+#include <numeric>
 #include <string_view>
 #include <thread>
 #include <utility>
@@ -17,27 +19,40 @@
 namespace portui {
 namespace {
 
-constexpr std::size_t kBenchmarkRuns = 5;
+constexpr std::size_t kBenchmarkRuns = 25;
 
 struct BenchmarkResult {
   double average_milliseconds = 0.0;
+  double p50_milliseconds = 0.0;
+  double p99_milliseconds = 0.0;
   std::size_t final_entry_count = 0;
 };
 
 BenchmarkResult Benchmark(Scanner* scanner) {
   using Clock = std::chrono::steady_clock;
-  std::chrono::nanoseconds elapsed{};
-  Snapshot snapshot;
+  std::vector<double> samples;
+  samples.reserve(kBenchmarkRuns);
+  Snapshot snapshot = scanner->Scan();  // Warm the shared lsof fallback cache.
 
   for (std::size_t run = 0; run < kBenchmarkRuns; ++run) {
     const Clock::time_point started_at = Clock::now();
     snapshot = scanner->Scan();
-    elapsed += std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - started_at);
+    samples.push_back(std::chrono::duration<double, std::milli>(Clock::now() - started_at).count());
   }
 
+  const double elapsed = std::accumulate(samples.begin(), samples.end(), 0.0);
+  std::sort(samples.begin(), samples.end());
+  const auto percentile = [&samples](double percentile) {
+    const std::size_t index = std::min(
+        samples.size() - 1,
+        static_cast<std::size_t>(std::ceil(percentile * static_cast<double>(samples.size())) - 1));
+    return samples[index];
+  };
+
   return {
-      .average_milliseconds =
-          std::chrono::duration<double, std::milli>(elapsed).count() / kBenchmarkRuns,
+      .average_milliseconds = elapsed / static_cast<double>(samples.size()),
+      .p50_milliseconds = percentile(0.50),
+      .p99_milliseconds = percentile(0.99),
       .final_entry_count = snapshot.entries.size(),
   };
 }
@@ -49,9 +64,11 @@ void PrintBenchmark() {
   const BenchmarkResult parallel = Benchmark(parallel_scanner.get());
 
   std::cout << "Benchmark: " << kBenchmarkRuns << " live scans per mode\n";
-  std::cout << "serial:   " << serial.average_milliseconds << " ms average, "
+  std::cout << "serial:   avg " << serial.average_milliseconds << " ms, p50 "
+            << serial.p50_milliseconds << " ms, p99 " << serial.p99_milliseconds << " ms, "
             << serial.final_entry_count << " entries in final scan\n";
-  std::cout << "parallel: " << parallel.average_milliseconds << " ms average, "
+  std::cout << "parallel: avg " << parallel.average_milliseconds << " ms, p50 "
+            << parallel.p50_milliseconds << " ms, p99 " << parallel.p99_milliseconds << " ms, "
             << parallel.final_entry_count << " entries in final scan\n";
   if (parallel.average_milliseconds > 0.0) {
     std::cout << "speedup:  " << serial.average_milliseconds / parallel.average_milliseconds

@@ -41,6 +41,8 @@ struct Snapshot {
   std::chrono::system_clock::time_point captured_at;
   std::size_t scanned_process_count = 0;
   std::chrono::nanoseconds scan_duration{};
+  std::chrono::nanoseconds lsof_refresh_duration{};
+  bool lsof_refreshed = false;
   std::uint64_t system_memory_bytes = 0;
   std::uint32_t logical_cpu_count = 1;
   std::vector<SocketEntry> entries;

@@ -21,7 +21,7 @@ CXXFLAGS := -std=c++20 -Wall -Wextra -pthread -Iinclude -I$(FTXUI_PREFIX)/includ
 LDFLAGS := -lproc -L$(FTXUI_PREFIX)/lib -lftxui-component -lftxui-dom -lftxui-screen \
 	-Wl,-rpath,$(FTXUI_PREFIX)/lib
 
-.PHONY: all run clean
+.PHONY: all run tsan clean
 
 all: portui
 
@@ -31,5 +31,8 @@ portui: $(SOURCES)
 run: portui
 	./portui
 
+tsan:
+	$(CXX) $(CXXFLAGS) -fsanitize=thread $(SOURCES) $(LDFLAGS) -o portui-tsan
+
 clean:
-	rm -f portui
+	rm -f portui portui-tsan
