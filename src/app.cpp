@@ -5,11 +5,13 @@
 #include <iostream>
 #include <memory>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include "portui/debug.hpp"
 #include "portui/scanner.hpp"
+#include "portui/snapshot_pipeline.hpp"
 
 namespace portui {
 namespace {
@@ -57,11 +59,35 @@ void PrintBenchmark() {
   std::cout << "Note: live scans may differ slightly as processes open or close sockets.\n";
 }
 
+void WatchSnapshots() {
+  SnapshotPipeline pipeline(CreateParallelScanner());
+  pipeline.Start();
+  std::chrono::system_clock::time_point last_capture{};
+
+  std::cout << "Watching for socket changes. Press Ctrl-C to stop.\n";
+  while (true) {
+    const std::optional<SnapshotUpdate> update = pipeline.Latest();
+    if (update.has_value() && update->snapshot.captured_at != last_capture) {
+      last_capture = update->snapshot.captured_at;
+      std::cout << "added=" << update->diff.added.size()
+                << " removed=" << update->diff.removed.size()
+                << " changed=" << update->diff.changed.size() << '\n';
+      std::cout << FormatSnapshotForDebug(update->snapshot);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+}
+
 }  // namespace
 
 int RunApp(std::span<const std::string_view> args) {
   if (!args.empty() && args.front() == "--benchmark") {
     PrintBenchmark();
+    return 0;
+  }
+
+  if (!args.empty() && args.front() == "--watch") {
+    WatchSnapshots();
     return 0;
   }
 
@@ -76,9 +102,10 @@ int RunApp(std::span<const std::string_view> args) {
     return 0;
   }
 
-  std::cout << "porTUI phase 2 scaffold ready.\n";
+  std::cout << "porTUI phase 3 scaffold ready.\n";
   std::cout << "Run with --scan to print a serial socket snapshot.\n";
   std::cout << "Run with --parallel-scan or --benchmark to exercise concurrent scanning.\n";
+  std::cout << "Run with --watch to print background scan updates and diffs.\n";
   return 0;
 }
 

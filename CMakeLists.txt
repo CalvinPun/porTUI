@@ -13,6 +13,8 @@ add_executable(portui
   src/main.cpp
   src/app.cpp
   src/core/debug.cpp
+  src/core/diff.cpp
+  src/core/snapshot_pipeline.cpp
   src/scanner/scanner_support.cpp
   src/scanner/serial_scanner.cpp
   src/scanner/parallel_scanner.cpp
