@@ -22,6 +22,8 @@ class SerialScanner final : public Scanner {
                               std::make_move_iterator(pid_entries.end()));
     }
     detail::FinalizeSnapshot(&snapshot);
+    detail::AppendLsofFallback(&snapshot);
+    detail::FinalizeSnapshot(&snapshot);
 
     return snapshot;
   }

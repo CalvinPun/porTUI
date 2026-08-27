@@ -71,6 +71,8 @@ class ParallelScanner final : public Scanner {
                               std::make_move_iterator(entries.end()));
     }
     detail::FinalizeSnapshot(&snapshot);
+    detail::AppendLsofFallback(&snapshot);
+    detail::FinalizeSnapshot(&snapshot);
     return snapshot;
   }
 

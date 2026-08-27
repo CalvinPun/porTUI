@@ -19,6 +19,7 @@ add_executable(portui
   src/core/snapshot_pipeline.cpp
   src/tui/live_table.cpp
   src/scanner/scanner_support.cpp
+  src/scanner/lsof_fallback.cpp
   src/scanner/serial_scanner.cpp
   src/scanner/parallel_scanner.cpp
 )
