@@ -56,6 +56,20 @@ std::string EntryKey(const SocketEntry& entry) {
          std::to_string(static_cast<int>(entry.protocol));
 }
 
+std::string FormatBytes(std::uint64_t bytes) {
+  if (bytes >= 1024ULL * 1024 * 1024) {
+    return std::to_string(bytes / (1024ULL * 1024 * 1024)) + " GB";
+  }
+  return std::to_string(bytes / (1024 * 1024)) + " MB";
+}
+
+std::string FormatRam(std::uint64_t bytes, std::uint64_t total_bytes) {
+  if (total_bytes == 0) {
+    return FormatBytes(bytes);
+  }
+  return FormatBytes(bytes) + " / " + FormatBytes(total_bytes);
+}
+
 Element Cell(const std::string& value, int width) {
   std::string display = value;
   const std::size_t max_content_width = static_cast<std::size_t>(std::max(0, width - 1));
@@ -154,6 +168,8 @@ class LiveTable {
   struct ProcessGroup {
     int pid = -1;
     std::string process_name;
+    double cpu_percent = 0.0;
+    std::uint64_t resident_bytes = 0;
     std::vector<SocketEntry> sockets;
   };
 
@@ -173,12 +189,21 @@ class LiveTable {
     groups_.clear();
     for (const SocketEntry& entry : entries_) {
       const auto group = std::find_if(groups_.begin(), groups_.end(), [&entry](const ProcessGroup& item) {
-        return item.pid == entry.pid && item.process_name == entry.process_name;
+        return item.pid == entry.pid;
       });
       if (group == groups_.end()) {
         groups_.push_back({.pid = entry.pid, .process_name = entry.process_name, .sockets = {entry}});
       } else {
         group->sockets.push_back(entry);
+      }
+    }
+    for (ProcessGroup& group : groups_) {
+      const auto usage = std::find_if(usage_.begin(), usage_.end(), [&group](const ProcessUsage& item) {
+        return item.pid == group.pid;
+      });
+      if (usage != usage_.end()) {
+        group.cpu_percent = usage->cpu_percent;
+        group.resident_bytes = usage->resident_bytes;
       }
     }
     std::sort(groups_.begin(), groups_.end(), [](const ProcessGroup& lhs, const ProcessGroup& rhs) {
@@ -211,6 +236,8 @@ class LiveTable {
 
     captured_at_ = update->snapshot.captured_at;
     entries_ = update->snapshot.entries;
+    usage_ = update->snapshot.process_usage;
+    system_memory_bytes_ = update->snapshot.system_memory_bytes;
     scanned_process_count_ = update->snapshot.scanned_process_count;
     has_snapshot_ = true;
     BuildGroups();
@@ -243,7 +270,8 @@ class LiveTable {
   Element Render() const {
     Elements rows;
     rows.push_back(hbox({Cell("SEL", 5), Cell("PID", 8), Cell("PROCESS", 22),
-                         Cell("SOCKETS", 10), Cell("LISTEN", 9), Cell("FDS", 7)}) |
+                         Cell("SOCKETS", 10), Cell("LISTEN", 9), Cell("CPU", 8),
+                         Cell("RAM / SYS", 22)}) |
                    bold | color(Color::Cyan));
     rows.push_back(separator());
 
@@ -253,19 +281,26 @@ class LiveTable {
       rows.push_back(text("No IPv4/IPv6 sockets found in the latest scan.") | dim);
     }
 
-    for (std::size_t index = 0; index < groups_.size(); ++index) {
+    constexpr std::size_t kVisibleGroupLimit = 16;
+    const std::size_t first_group = selected_row_ > static_cast<int>(kVisibleGroupLimit / 2)
+                                        ? static_cast<std::size_t>(selected_row_ - kVisibleGroupLimit / 2)
+                                        : 0;
+    const std::size_t last_group = std::min(groups_.size(), first_group + kVisibleGroupLimit);
+    if (first_group > 0) {
+      rows.push_back(text("... " + std::to_string(first_group) + " processes above") | dim);
+    }
+    for (std::size_t index = first_group; index < last_group; ++index) {
       const ProcessGroup& group = groups_[index];
       const std::size_t listener_count = std::count_if(
           group.sockets.begin(), group.sockets.end(), [](const SocketEntry& entry) {
             return entry.state == SocketState::kListen;
           });
-      const std::uint32_t fd_count = std::accumulate(
-          group.sockets.begin(), group.sockets.end(), 0U,
-          [](std::uint32_t total, const SocketEntry& entry) { return total + entry.fd_count; });
+      const std::string cpu = std::to_string(group.cpu_percent).substr(0, 5) + "%";
+      const std::string ram = FormatRam(group.resident_bytes, system_memory_bytes_);
       Element row = hbox({Cell(selected_pids_.contains(group.pid) ? "[x]" : "[ ]", 5),
                           Cell(std::to_string(group.pid), 8), Cell(group.process_name, 22),
                           Cell(std::to_string(group.sockets.size()), 10),
-                          Cell(std::to_string(listener_count), 9), Cell(std::to_string(fd_count), 7)});
+                          Cell(std::to_string(listener_count), 9), Cell(cpu, 8), Cell(ram, 22)});
       if (static_cast<int>(index) == selected_row_) {
         row = row | bgcolor(Color::Blue) | color(Color::White);
       } else if (GroupHasEntries(group, added_keys_)) {
@@ -274,6 +309,9 @@ class LiveTable {
         row = row | color(Color::Yellow);
       }
       rows.push_back(row);
+    }
+    if (last_group < groups_.size()) {
+      rows.push_back(text("... " + std::to_string(groups_.size() - last_group) + " processes below") | dim);
     }
 
     if (expanded_pid_.has_value()) {
@@ -303,7 +341,8 @@ class LiveTable {
       }
     }
 
-    const std::string summary = "processes: " + std::to_string(scanned_process_count_) +
+    const std::string summary = "scanned: " + std::to_string(scanned_process_count_) +
+                                "  socket owners: " + std::to_string(groups_.size()) +
                                 "  sockets: " + std::to_string(entries_.size()) +
                                 "  selected: " + std::to_string(selected_pids_.size()) +
                                 "  up/down: move  enter: ports  space: select  k: terminate  q: quit";
@@ -326,8 +365,10 @@ class LiveTable {
   ProcessKiller killer_;
   std::chrono::system_clock::time_point captured_at_{};
   std::size_t scanned_process_count_ = 0;
+  std::uint64_t system_memory_bytes_ = 0;
   bool has_snapshot_ = false;
   std::vector<SocketEntry> entries_;
+  std::vector<ProcessUsage> usage_;
   std::vector<ProcessGroup> groups_;
   std::unordered_set<int> selected_pids_;
   std::unordered_set<std::string> added_keys_;

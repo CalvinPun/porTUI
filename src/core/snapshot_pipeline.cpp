@@ -1,5 +1,7 @@
 #include "portui/snapshot_pipeline.hpp"
 
+#include "../scanner/scanner_support.hpp"
+
 #include <stdexcept>
 #include <utility>
 
@@ -58,6 +60,7 @@ void SnapshotPipeline::Run() {
   std::optional<Snapshot> previous;
   while (true) {
     Snapshot snapshot = scanner_->Scan();
+    detail::PopulateProcessUsage(&snapshot);
     DiffResult diff;
     if (previous.has_value()) {
       diff = DiffSnapshots(*previous, snapshot);

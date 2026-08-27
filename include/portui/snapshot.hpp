@@ -29,10 +29,20 @@ struct SocketEntry {
   std::uint32_t fd_count = 1;
 };
 
+struct ProcessUsage {
+  int pid = -1;
+  int parent_pid = -1;
+  std::string process_name;
+  double cpu_percent = 0.0;
+  std::uint64_t resident_bytes = 0;
+};
+
 struct Snapshot {
   std::chrono::system_clock::time_point captured_at;
   std::size_t scanned_process_count = 0;
+  std::uint64_t system_memory_bytes = 0;
   std::vector<SocketEntry> entries;
+  std::vector<ProcessUsage> process_usage;
 };
 
 }  // namespace portui

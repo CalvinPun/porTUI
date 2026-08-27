@@ -16,6 +16,7 @@ add_executable(portui
   src/core/debug.cpp
   src/core/diff.cpp
   src/core/process_killer.cpp
+  src/core/process_usage.cpp
   src/core/snapshot_pipeline.cpp
   src/tui/live_table.cpp
   src/scanner/scanner_support.cpp
