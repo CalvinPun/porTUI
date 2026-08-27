@@ -82,6 +82,17 @@ void WatchSnapshots() {
 }  // namespace
 
 int RunApp(std::span<const std::string_view> args) {
+  if (!args.empty() && (args.front() == "--help" || args.front() == "-h")) {
+    std::cout << "porTUI - live macOS port monitor\n\n";
+    std::cout << "Usage: portui [option]\n\n";
+    std::cout << "  --tui             Launch the interactive monitor (default)\n";
+    std::cout << "  --scan            Print a serial socket snapshot\n";
+    std::cout << "  --parallel-scan   Print a parallel socket snapshot\n";
+    std::cout << "  --benchmark       Compare serial and parallel scans\n";
+    std::cout << "  --watch           Print live snapshots and diffs\n";
+    std::cout << "  --help, -h        Show this help\n";
+    return 0;
+  }
   if (!args.empty() && args.front() == "--benchmark") {
     PrintBenchmark();
     return 0;

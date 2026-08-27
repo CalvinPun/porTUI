@@ -16,6 +16,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -78,7 +79,14 @@ std::string FormatPercent(double value) {
   return output.str();
 }
 
-std::string FormatPorts(const std::vector<SocketEntry>& sockets) {
+std::string FormatDuration(std::chrono::nanoseconds duration) {
+  const double milliseconds = std::chrono::duration<double, std::milli>(duration).count();
+  std::ostringstream output;
+  output << std::fixed << std::setprecision(1) << milliseconds << "ms";
+  return output.str();
+}
+
+std::size_t CountUniquePorts(const std::vector<SocketEntry>& sockets) {
   std::vector<std::uint16_t> ports;
   ports.reserve(sockets.size());
   for (const SocketEntry& socket : sockets) {
@@ -86,22 +94,7 @@ std::string FormatPorts(const std::vector<SocketEntry>& sockets) {
   }
   std::sort(ports.begin(), ports.end());
   ports.erase(std::unique(ports.begin(), ports.end()), ports.end());
-  if (ports.empty()) {
-    return "-";
-  }
-
-  constexpr std::size_t kShownPortLimit = 3;
-  std::string result;
-  for (std::size_t index = 0; index < std::min(ports.size(), kShownPortLimit); ++index) {
-    if (!result.empty()) {
-      result += ",";
-    }
-    result += std::to_string(ports[index]);
-  }
-  if (ports.size() > kShownPortLimit) {
-    result += " +" + std::to_string(ports.size() - kShownPortLimit);
-  }
-  return result;
+  return ports.size();
 }
 
 Element Cell(const std::string& value, int width) {
@@ -134,6 +127,22 @@ class LiveTable {
       if (event == Event::Custom) {
         Refresh();
         DrainKillResults();
+        return true;
+      }
+      if (confirm_force_kill_) {
+        if (event == Event::y || event == Event::Y) {
+          killer_.DispatchForce(pending_force_kill_pids_);
+          status_lines_.push_front("Dispatched SIGKILL to " +
+                                   std::to_string(pending_force_kill_pids_.size()) + " process(es).");
+          pending_force_kill_pids_.clear();
+          confirm_force_kill_ = false;
+          return true;
+        }
+        if (event == Event::n || event == Event::N || event == Event::Escape) {
+          pending_force_kill_pids_.clear();
+          confirm_force_kill_ = false;
+          return true;
+        }
         return true;
       }
       if (confirm_kill_) {
@@ -184,6 +193,10 @@ class LiveTable {
         }
         return true;
       }
+      if (event == Event::Character('?')) {
+        show_help_ = !show_help_;
+        return true;
+      }
       if (event == Event::q || event == Event::Escape) {
         screen.Exit();
         return true;
@@ -217,6 +230,22 @@ class LiveTable {
     for (int pid : pids) {
       selected_pids_.erase(pid);
     }
+  }
+
+  std::string DescribePids(const std::vector<int>& pids) const {
+    std::vector<std::string> names;
+    names.reserve(pids.size());
+    for (int pid : pids) {
+      const auto group = std::find_if(groups_.begin(), groups_.end(), [pid](const ProcessGroup& item) {
+        return item.pid == pid;
+      });
+      names.push_back(group == groups_.end() ? "PID " + std::to_string(pid)
+                                             : group->process_name + " (PID " + std::to_string(pid) + ")");
+    }
+    if (names.size() > 2) {
+      return names[0] + ", " + names[1] + ", and " + std::to_string(names.size() - 2) + " more";
+    }
+    return names.empty() ? "no processes" : names.size() == 1 ? names.front() : names[0] + " and " + names[1];
   }
 
   std::pair<std::size_t, std::size_t> VisibleGroupRange() const {
@@ -254,16 +283,27 @@ class LiveTable {
     });
   }
 
-  bool GroupHasEntries(const ProcessGroup& group,
-                       const std::unordered_set<std::string>& keys) const {
-    return std::any_of(group.sockets.begin(), group.sockets.end(), [&keys](const SocketEntry& entry) {
-      return keys.contains(EntryKey(entry));
+  bool GroupHasEntries(
+      const ProcessGroup& group,
+      const std::unordered_map<std::string, std::chrono::steady_clock::time_point>& highlights) const {
+    return std::any_of(group.sockets.begin(), group.sockets.end(), [&highlights](const SocketEntry& entry) {
+      return highlights.contains(EntryKey(entry));
     });
   }
 
   void DrainKillResults() {
     for (const KillResult& result : killer_.DrainResults()) {
       status_lines_.push_front("PID " + std::to_string(result.pid) + ": " + result.message);
+      if (result.status == KillStatus::kStillRunning && result.can_force_kill) {
+        pending_force_kill_pids_.push_back(result.pid);
+      }
+    }
+    if (!confirm_kill_ && !confirm_force_kill_ && !pending_force_kill_pids_.empty()) {
+      std::sort(pending_force_kill_pids_.begin(), pending_force_kill_pids_.end());
+      pending_force_kill_pids_.erase(
+          std::unique(pending_force_kill_pids_.begin(), pending_force_kill_pids_.end()),
+          pending_force_kill_pids_.end());
+      confirm_force_kill_ = true;
     }
     while (status_lines_.size() > 3) {
       status_lines_.pop_back();
@@ -281,6 +321,7 @@ class LiveTable {
     usage_ = update->snapshot.process_usage;
     system_memory_bytes_ = update->snapshot.system_memory_bytes;
     logical_cpu_count_ = update->snapshot.logical_cpu_count;
+    scan_duration_ = update->snapshot.scan_duration;
     scanned_process_count_ = update->snapshot.scanned_process_count;
     has_snapshot_ = true;
     total_cpu_percent_ = 0.0;
@@ -303,13 +344,15 @@ class LiveTable {
         })) {
       expanded_pid_.reset();
     }
-    added_keys_.clear();
-    changed_keys_.clear();
+    const auto now = std::chrono::steady_clock::now();
+    const auto expires_at = now + std::chrono::seconds(3);
+    std::erase_if(added_highlights_, [now](const auto& item) { return item.second <= now; });
+    std::erase_if(changed_highlights_, [now](const auto& item) { return item.second <= now; });
     for (const SocketEntry& entry : update->diff.added) {
-      added_keys_.insert(EntryKey(entry));
+      added_highlights_[EntryKey(entry)] = expires_at;
     }
     for (const SocketEntry& entry : update->diff.changed) {
-      changed_keys_.insert(EntryKey(entry));
+      changed_highlights_[EntryKey(entry)] = expires_at;
     }
     if (groups_.empty()) {
       selected_row_ = 0;
@@ -321,8 +364,8 @@ class LiveTable {
   Element Render() const {
     Elements rows;
     rows.push_back(hbox({Cell("SEL", 6), Cell("PID", 8), Cell("PROCESS", 17),
-                         Cell("PORTS", 16), Cell("LISTEN", 9), Cell("CPU", 8),
-                         Cell("RAM / SYS", 15)}) |
+                         Cell("PORTS", 10), Cell("LISTEN", 9), Cell("CPU", 8),
+                         Cell("RAM / SYS", 21)}) |
                    bold | color(Color::Cyan));
     rows.push_back(separator());
 
@@ -346,13 +389,13 @@ class LiveTable {
       const std::string ram = FormatRam(group.resident_bytes, system_memory_bytes_);
       Element row = hbox({Cell(selected_pids_.contains(group.pid) ? "[x]" : "[ ]", 6),
                           Cell(std::to_string(group.pid), 8), Cell(group.process_name, 17),
-                          Cell(FormatPorts(group.sockets), 16),
-                          Cell(std::to_string(listener_count), 9), Cell(cpu, 8), Cell(ram, 15)});
+                          Cell(std::to_string(CountUniquePorts(group.sockets)) + " ports", 10),
+                          Cell(std::to_string(listener_count), 9), Cell(cpu, 8), Cell(ram, 21)});
       if (static_cast<int>(index) == selected_row_) {
         row = row | bgcolor(Color::Blue) | color(Color::White);
-      } else if (GroupHasEntries(group, added_keys_)) {
+      } else if (GroupHasEntries(group, added_highlights_)) {
         row = row | color(Color::Green);
-      } else if (GroupHasEntries(group, changed_keys_)) {
+      } else if (GroupHasEntries(group, changed_highlights_)) {
         row = row | color(Color::Yellow);
       }
       rows.push_back(row);
@@ -393,11 +436,12 @@ class LiveTable {
                                     : groups_[selected_row_].process_name + " (" +
                                           std::to_string(groups_[selected_row_].pid) + ")";
     const std::string summary = "focused: " + focused +
+                                "  scan: " + FormatDuration(scan_duration_) + " parallel" +
                                 "  scanned: " + std::to_string(scanned_process_count_) +
                                 "  socket owners: " + std::to_string(groups_.size()) +
                                 "  sockets: " + std::to_string(entries_.size()) +
                                 "  selected: " + std::to_string(selected_pids_.size());
-    const std::string controls = "up/down: move  enter: ports  space: select  k: terminate  q: quit";
+    const std::string controls = "up/down: move  enter: ports  space: select  k: terminate  ?: help  q: quit";
     const std::string usage_summary = has_snapshot_
                                           ? "TOTAL CPU: " + FormatPercent(total_cpu_percent_) +
                                                 "  PROCESS RSS: " +
@@ -405,9 +449,18 @@ class LiveTable {
                                           : "TOTAL CPU: gathering...  PROCESS RSS: gathering...";
     Elements footer;
     if (confirm_kill_) {
-      footer.push_back(text("Send SIGTERM to " + std::to_string(pending_kill_pids_.size()) +
-                            " selected process(es)? [y/n]") |
+      footer.push_back(text("Send SIGTERM to " + DescribePids(pending_kill_pids_) + "? [y/n]") |
                        bold | color(Color::Red));
+    }
+    if (confirm_force_kill_) {
+      footer.push_back(text("SIGTERM did not stop " + DescribePids(pending_force_kill_pids_) +
+                            ". Send SIGKILL? [y/n]") |
+                       bold | color(Color::Red));
+    }
+    if (show_help_) {
+      footer.push_back(text("KEYS  up/down: focus  enter: show ports  space: select  k: SIGTERM") |
+                       color(Color::Cyan));
+      footer.push_back(text("      y/n: confirm or cancel  ?: close help  q: quit") | color(Color::Cyan));
     }
     for (const std::string& status : status_lines_) {
       footer.push_back(text(status) | dim);
@@ -426,6 +479,7 @@ class LiveTable {
   std::size_t scanned_process_count_ = 0;
   std::uint64_t system_memory_bytes_ = 0;
   std::uint32_t logical_cpu_count_ = 1;
+  std::chrono::nanoseconds scan_duration_{};
   double total_cpu_percent_ = 0.0;
   std::uint64_t total_resident_bytes_ = 0;
   bool has_snapshot_ = false;
@@ -433,12 +487,15 @@ class LiveTable {
   std::vector<ProcessUsage> usage_;
   std::vector<ProcessGroup> groups_;
   std::unordered_set<int> selected_pids_;
-  std::unordered_set<std::string> added_keys_;
-  std::unordered_set<std::string> changed_keys_;
+  std::unordered_map<std::string, std::chrono::steady_clock::time_point> added_highlights_;
+  std::unordered_map<std::string, std::chrono::steady_clock::time_point> changed_highlights_;
   std::vector<int> pending_kill_pids_;
+  std::vector<int> pending_force_kill_pids_;
   std::deque<std::string> status_lines_;
   std::optional<int> expanded_pid_;
   bool confirm_kill_ = false;
+  bool confirm_force_kill_ = false;
+  bool show_help_ = false;
   int selected_row_ = 0;
 };
 

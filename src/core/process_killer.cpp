@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <string>
 #include <utility>
@@ -12,16 +13,7 @@
 namespace portui {
 namespace {
 
-KillResult TerminateProcess(int pid) {
-  if (pid == getpid()) {
-    return {.pid = pid,
-            .status = KillStatus::kError,
-            .message = "refused to terminate porTUI itself"};
-  }
-  if (kill(pid, SIGTERM) == 0) {
-    return {.pid = pid, .status = KillStatus::kSuccess, .message = "SIGTERM sent"};
-  }
-
+KillResult ErrorForErrno(int pid) {
   switch (errno) {
     case EPERM:
       return {.pid = pid, .status = KillStatus::kPermissionDenied, .message = "permission denied"};
@@ -30,6 +22,49 @@ KillResult TerminateProcess(int pid) {
     default:
       return {.pid = pid, .status = KillStatus::kError, .message = std::strerror(errno)};
   }
+}
+
+KillResult TerminateProcess(int pid) {
+  if (pid == getpid()) {
+    return {.pid = pid,
+            .status = KillStatus::kError,
+            .message = "refused to terminate porTUI itself"};
+  }
+  if (kill(pid, SIGTERM) != 0) {
+    return ErrorForErrno(pid);
+  }
+
+  std::this_thread::sleep_for(std::chrono::seconds(1));
+  if (kill(pid, 0) != 0) {
+    if (errno == ESRCH) {
+      return {.pid = pid, .status = KillStatus::kSuccess, .message = "terminated after SIGTERM"};
+    }
+    return ErrorForErrno(pid);
+  }
+  return {.pid = pid,
+          .status = KillStatus::kStillRunning,
+          .can_force_kill = true,
+          .message = "still running after SIGTERM"};
+}
+
+KillResult ForceKillProcess(int pid) {
+  if (pid == getpid()) {
+    return {.pid = pid,
+            .status = KillStatus::kError,
+            .message = "refused to terminate porTUI itself"};
+  }
+  if (kill(pid, SIGKILL) != 0) {
+    return ErrorForErrno(pid);
+  }
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  if (kill(pid, 0) != 0) {
+    if (errno == ESRCH) {
+      return {.pid = pid, .status = KillStatus::kSuccess, .message = "terminated with SIGKILL"};
+    }
+    return ErrorForErrno(pid);
+  }
+  return {.pid = pid, .status = KillStatus::kStillRunning, .message = "still running after SIGKILL"};
 }
 
 }  // namespace
@@ -63,7 +98,26 @@ void ProcessKiller::Dispatch(std::vector<int> pids) {
 
   {
     std::lock_guard lock(mutex_);
-    pending_pids_.insert(pending_pids_.end(), pids.begin(), pids.end());
+    for (int pid : pids) {
+      pending_requests_.push_back({.pid = pid, .force = false});
+    }
+  }
+  work_ready_.notify_all();
+}
+
+void ProcessKiller::DispatchForce(std::vector<int> pids) {
+  pids.erase(std::remove_if(pids.begin(), pids.end(), [](int pid) { return pid <= 0; }), pids.end());
+  std::sort(pids.begin(), pids.end());
+  pids.erase(std::unique(pids.begin(), pids.end()), pids.end());
+  if (pids.empty()) {
+    return;
+  }
+
+  {
+    std::lock_guard lock(mutex_);
+    for (int pid : pids) {
+      pending_requests_.push_back({.pid = pid, .force = true});
+    }
   }
   work_ready_.notify_all();
 }
@@ -77,18 +131,18 @@ std::vector<KillResult> ProcessKiller::DrainResults() {
 
 void ProcessKiller::RunWorker() {
   while (true) {
-    int pid = -1;
+    KillRequest request;
     {
       std::unique_lock lock(mutex_);
-      work_ready_.wait(lock, [this] { return stopping_ || !pending_pids_.empty(); });
-      if (stopping_ && pending_pids_.empty()) {
+      work_ready_.wait(lock, [this] { return stopping_ || !pending_requests_.empty(); });
+      if (stopping_ && pending_requests_.empty()) {
         return;
       }
-      pid = pending_pids_.back();
-      pending_pids_.pop_back();
+      request = pending_requests_.back();
+      pending_requests_.pop_back();
     }
 
-    KillResult result = TerminateProcess(pid);
+    KillResult result = request.force ? ForceKillProcess(request.pid) : TerminateProcess(request.pid);
     {
       std::lock_guard lock(mutex_);
       results_.push_back(std::move(result));

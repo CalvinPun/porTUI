@@ -6,6 +6,7 @@ namespace portui {
 
 enum class KillStatus {
   kSuccess,
+  kStillRunning,
   kPermissionDenied,
   kAlreadyExited,
   kError,
@@ -14,6 +15,7 @@ enum class KillStatus {
 struct KillResult {
   int pid = -1;
   KillStatus status = KillStatus::kError;
+  bool can_force_kill = false;
   std::string message;
 };
 
