@@ -98,17 +98,20 @@ std::size_t CountUniquePorts(const std::vector<SocketEntry>& sockets) {
 }
 
 Color CpuColor(double percent) {
-  if (percent >= 80.0) return Color::RedLight;
-  if (percent >= 30.0) return Color::YellowLight;
+  if (percent < 0.1) return Color::GrayDark;
+  if (percent >= 10.0) return Color::RedLight;
+  if (percent >= 2.0) return Color::YellowLight;
   return Color::GreenLight;
 }
 
-Color RamColor(std::uint64_t resident_bytes, std::uint64_t system_memory_bytes) {
-  if (system_memory_bytes == 0) return Color::GrayLight;
-  const double fraction = static_cast<double>(resident_bytes) /
-                          static_cast<double>(system_memory_bytes);
-  if (fraction >= 0.15) return Color::RedLight;
-  if (fraction >= 0.05) return Color::YellowLight;
+Color RamColor(std::uint64_t resident_bytes) {
+  constexpr std::uint64_t kMebibyte = 1024ULL * 1024;
+  constexpr std::uint64_t kGreenThreshold = 64 * kMebibyte;
+  constexpr std::uint64_t kYellowThreshold = 256 * kMebibyte;
+  constexpr std::uint64_t kRedThreshold = 1024 * kMebibyte;
+  if (resident_bytes < kGreenThreshold) return Color::GrayDark;
+  if (resident_bytes >= kRedThreshold) return Color::RedLight;
+  if (resident_bytes >= kYellowThreshold) return Color::YellowLight;
   return Color::GreenLight;
 }
 
@@ -520,7 +523,7 @@ class LiveTable {
                           Cell(std::to_string(listener_count), 8) |
                               color(StateColor(listener_count, established_count)),
                           Cell(cpu, 7) | color(CpuColor(group.cpu_percent)),
-                          Cell(ram, 18) | color(RamColor(group.resident_bytes, system_memory_bytes_))});
+                          Cell(ram, 18) | color(RamColor(group.resident_bytes))});
       if (static_cast<int>(index) == selected_row_) {
         row = row | bgcolor(Color::Blue) | color(Color::White);
       } else if (GroupHasEntries(group, added_highlights_)) {
