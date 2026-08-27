@@ -15,7 +15,8 @@ EntryKey KeyFor(const SocketEntry& entry) {
 }
 
 bool HasChanged(const SocketEntry& previous, const SocketEntry& current) {
-  return previous.process_name != current.process_name || previous.state != current.state;
+  return previous.process_name != current.process_name || previous.state != current.state ||
+         previous.fd_count != current.fd_count;
 }
 
 }  // namespace

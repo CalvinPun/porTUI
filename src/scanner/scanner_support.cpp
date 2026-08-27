@@ -17,6 +17,8 @@ namespace {
 
 constexpr std::size_t kPidBatchSize = 4096;
 constexpr std::size_t kFallbackFdCapacity = 64;
+constexpr std::size_t kMaxPidCapacity = 1U << 20;
+constexpr std::size_t kMaxFdCapacity = 1U << 20;
 
 Protocol MapProtocol(const socket_info& socket) {
   switch (socket.soi_protocol) {
@@ -62,9 +64,21 @@ bool IsInetSocket(const socket_fdinfo& socket_fd) {
   return socket_fd.psi.soi_family == AF_INET || socket_fd.psi.soi_family == AF_INET6;
 }
 
-bool SameEntry(const SocketEntry& lhs, const SocketEntry& rhs) {
+bool SameSocket(const SocketEntry& lhs, const SocketEntry& rhs) {
   return lhs.pid == rhs.pid && lhs.process_name == rhs.process_name &&
-         lhs.port == rhs.port && lhs.protocol == rhs.protocol && lhs.state == rhs.state;
+         lhs.port == rhs.port && lhs.protocol == rhs.protocol;
+}
+
+int StatePriority(SocketState state) {
+  switch (state) {
+    case SocketState::kListen:
+      return 2;
+    case SocketState::kEstablished:
+      return 1;
+    case SocketState::kUnknown:
+      return 0;
+  }
+  return 0;
 }
 
 std::string ResolveProcessName(int pid, const proc_bsdinfo& bsd_info) {
@@ -83,14 +97,21 @@ std::string ResolveProcessName(int pid, const proc_bsdinfo& bsd_info) {
 }
 
 std::vector<proc_fdinfo> ListProcessFds(int pid, std::size_t hint) {
-  std::vector<proc_fdinfo> fds(std::max(hint, kFallbackFdCapacity));
-  const int bytes_filled = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, fds.data(),
-                                        static_cast<int>(fds.size() * sizeof(proc_fdinfo)));
-  if (bytes_filled <= 0) {
-    return {};
+  std::size_t capacity = std::min(std::max(hint, kFallbackFdCapacity), kMaxFdCapacity);
+  while (true) {
+    std::vector<proc_fdinfo> fds(capacity);
+    const int bytes_filled = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, fds.data(),
+                                          static_cast<int>(fds.size() * sizeof(proc_fdinfo)));
+    if (bytes_filled <= 0) {
+      return {};
+    }
+    const std::size_t fd_count = static_cast<std::size_t>(bytes_filled) / sizeof(proc_fdinfo);
+    if (fd_count < capacity || capacity == kMaxFdCapacity) {
+      fds.resize(fd_count);
+      return fds;
+    }
+    capacity = std::min(capacity * 2, kMaxFdCapacity);
   }
-  fds.resize(static_cast<std::size_t>(bytes_filled) / sizeof(proc_fdinfo));
-  return fds;
 }
 
 bool ReadSocketInfo(int pid, int fd, socket_fdinfo* socket_fd) {
@@ -102,14 +123,22 @@ bool ReadSocketInfo(int pid, int fd, socket_fdinfo* socket_fd) {
 }  // namespace
 
 std::vector<int> ListAllPids() {
-  std::vector<int> pids(kPidBatchSize);
-  const int bytes_filled = proc_listallpids(pids.data(), static_cast<int>(pids.size() * sizeof(int)));
-  if (bytes_filled <= 0) {
-    return {};
+  std::size_t capacity = kPidBatchSize;
+  while (true) {
+    std::vector<int> pids(capacity);
+    const int bytes_filled =
+        proc_listallpids(pids.data(), static_cast<int>(pids.size() * sizeof(int)));
+    if (bytes_filled <= 0) {
+      return {};
+    }
+    const std::size_t pid_count = static_cast<std::size_t>(bytes_filled) / sizeof(int);
+    if (pid_count < capacity || capacity == kMaxPidCapacity) {
+      pids.resize(pid_count);
+      pids.erase(std::remove(pids.begin(), pids.end(), 0), pids.end());
+      return pids;
+    }
+    capacity = std::min(capacity * 2, kMaxPidCapacity);
   }
-  pids.resize(static_cast<std::size_t>(bytes_filled) / sizeof(int));
-  pids.erase(std::remove(pids.begin(), pids.end(), 0), pids.end());
-  return pids;
 }
 
 std::vector<SocketEntry> ScanPid(int pid) {
@@ -154,15 +183,33 @@ std::vector<SocketEntry> ScanPid(int pid) {
 void FinalizeSnapshot(Snapshot* snapshot) {
   std::sort(snapshot->entries.begin(), snapshot->entries.end(),
             [](const SocketEntry& lhs, const SocketEntry& rhs) {
-              if (lhs.port != rhs.port) return lhs.port < rhs.port;
               if (lhs.pid != rhs.pid) return lhs.pid < rhs.pid;
               if (lhs.process_name != rhs.process_name) return lhs.process_name < rhs.process_name;
+              if (lhs.port != rhs.port) return lhs.port < rhs.port;
               if (lhs.protocol != rhs.protocol) return lhs.protocol < rhs.protocol;
               return lhs.state < rhs.state;
             });
-  snapshot->entries.erase(
-      std::unique(snapshot->entries.begin(), snapshot->entries.end(), SameEntry),
-      snapshot->entries.end());
+  std::vector<SocketEntry> compacted;
+  compacted.reserve(snapshot->entries.size());
+  for (const SocketEntry& entry : snapshot->entries) {
+    if (compacted.empty() || !SameSocket(compacted.back(), entry)) {
+      compacted.push_back(entry);
+      continue;
+    }
+
+    SocketEntry& existing = compacted.back();
+    existing.fd_count += entry.fd_count;
+    if (StatePriority(entry.state) > StatePriority(existing.state)) {
+      existing.state = entry.state;
+    }
+  }
+  std::sort(compacted.begin(), compacted.end(), [](const SocketEntry& lhs, const SocketEntry& rhs) {
+    if (lhs.port != rhs.port) return lhs.port < rhs.port;
+    if (lhs.pid != rhs.pid) return lhs.pid < rhs.pid;
+    if (lhs.process_name != rhs.process_name) return lhs.process_name < rhs.process_name;
+    return lhs.protocol < rhs.protocol;
+  });
+  snapshot->entries = std::move(compacted);
 }
 
 }  // namespace portui::detail

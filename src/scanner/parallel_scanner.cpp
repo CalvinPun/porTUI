@@ -51,6 +51,7 @@ class ParallelScanner final : public Scanner {
     Snapshot snapshot;
     snapshot.captured_at = std::chrono::system_clock::now();
     std::vector<int> pids = detail::ListAllPids();
+    snapshot.scanned_process_count = pids.size();
     if (pids.empty()) {
       return snapshot;
     }

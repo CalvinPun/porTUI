@@ -42,6 +42,7 @@ std::string FormatSnapshotForDebug(const Snapshot& snapshot) {
 
   output << "snapshot captured_at="
          << std::put_time(std::localtime(&timestamp), "%Y-%m-%d %H:%M:%S")
+         << " scanned_processes=" << snapshot.scanned_process_count
          << '\n';
 
   if (snapshot.entries.empty()) {
@@ -53,7 +54,8 @@ std::string FormatSnapshotForDebug(const Snapshot& snapshot) {
     output << "pid=" << entry.pid << " process=" << entry.process_name
            << " port=" << entry.port
            << " protocol=" << ToString(entry.protocol)
-           << " state=" << ToString(entry.state) << '\n';
+           << " state=" << ToString(entry.state)
+           << " fds=" << entry.fd_count << '\n';
   }
 
   return output.str();

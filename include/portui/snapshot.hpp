@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -25,10 +26,12 @@ struct SocketEntry {
   std::uint16_t port = 0;
   Protocol protocol = Protocol::kUnknown;
   SocketState state = SocketState::kUnknown;
+  std::uint32_t fd_count = 1;
 };
 
 struct Snapshot {
   std::chrono::system_clock::time_point captured_at;
+  std::size_t scanned_process_count = 0;
   std::vector<SocketEntry> entries;
 };
 

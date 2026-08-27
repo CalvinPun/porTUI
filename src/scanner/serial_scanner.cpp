@@ -14,6 +14,7 @@ class SerialScanner final : public Scanner {
     snapshot.captured_at = std::chrono::system_clock::now();
 
     const std::vector<int> pids = detail::ListAllPids();
+    snapshot.scanned_process_count = pids.size();
     for (int pid : pids) {
       std::vector<SocketEntry> pid_entries = detail::ScanPid(pid);
       snapshot.entries.insert(snapshot.entries.end(),
