@@ -4,10 +4,12 @@
 #include <ftxui/component/event.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
+#include <ftxui/screen/terminal.hpp>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <deque>
@@ -276,6 +278,31 @@ class LiveTable {
         }
         return true;
       }
+      if (filtering_) {
+        if (event == Event::Return) {
+          filtering_ = false;
+          return true;
+        }
+        if (event == Event::Escape) {
+          filter_query_.clear();
+          filtering_ = false;
+          RebuildGroupsPreservingFocus();
+          return true;
+        }
+        if (event == Event::Backspace) {
+          if (!filter_query_.empty()) {
+            filter_query_.pop_back();
+            RebuildGroupsPreservingFocus();
+          }
+          return true;
+        }
+        if (event.is_character()) {
+          filter_query_ += event.character();
+          RebuildGroupsPreservingFocus();
+          return true;
+        }
+        return true;
+      }
       if (theme_menu_) {
         if (event == Event::ArrowUp) {
           theme_menu_row_ = std::max(0, theme_menu_row_ - 1);
@@ -357,6 +384,12 @@ class LiveTable {
         theme_menu_ = true;
         return true;
       }
+      if (event == Event::Character('/')) {
+        filter_query_.clear();
+        filtering_ = true;
+        RebuildGroupsPreservingFocus();
+        return true;
+      }
       if (event == Event::Character('?')) {
         show_help_ = !show_help_;
         return true;
@@ -421,12 +454,25 @@ class LiveTable {
     return names.empty() ? "no processes" : names.size() == 1 ? names.front() : names[0] + " and " + names[1];
   }
 
+  std::size_t ExpandedDetailLimit() const {
+    // Keep actual socket rows visible above the footer on short terminals.
+    const int available_rows = Terminal::Size().dimy - 20;
+    return static_cast<std::size_t>(std::clamp(available_rows, 3, 8));
+  }
+
+  std::size_t ExpandedGroupLimit() const {
+    const int available_rows = Terminal::Size().dimy - 18 -
+                               static_cast<int>(ExpandedDetailLimit());
+    return static_cast<std::size_t>(std::clamp(available_rows, 3, 8));
+  }
+
   std::pair<std::size_t, std::size_t> VisibleGroupRange() const {
-    constexpr std::size_t kVisibleGroupLimit = 16;
-    const std::size_t first_group = selected_row_ > static_cast<int>(kVisibleGroupLimit / 2)
-                                        ? static_cast<std::size_t>(selected_row_ - kVisibleGroupLimit / 2)
+    const std::size_t visible_group_limit =
+        expanded_pid_.has_value() ? ExpandedGroupLimit() : 16;
+    const std::size_t first_group = selected_row_ > static_cast<int>(visible_group_limit / 2)
+                                        ? static_cast<std::size_t>(selected_row_ - visible_group_limit / 2)
                                         : 0;
-    return {first_group, std::min(groups_.size(), first_group + kVisibleGroupLimit)};
+    return {first_group, std::min(groups_.size(), first_group + visible_group_limit)};
   }
 
   static std::string SortModeName(SortMode mode) {
@@ -513,6 +559,34 @@ class LiveTable {
       }
     }
     SortGroups();
+    if (!filter_query_.empty()) {
+      const std::string query = Lowercase(filter_query_);
+      std::erase_if(groups_, [&query](const ProcessGroup& group) {
+        return Lowercase(group.process_name).find(query) == std::string::npos;
+      });
+    }
+  }
+
+  static std::string Lowercase(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character) {
+      return static_cast<char>(std::tolower(character));
+    });
+    return value;
+  }
+
+  void RebuildGroupsPreservingFocus() {
+    const int focused_pid = groups_.empty() ? -1 : groups_[selected_row_].pid;
+    BuildGroups();
+    const auto focused = std::find_if(groups_.begin(), groups_.end(), [focused_pid](const ProcessGroup& group) {
+      return group.pid == focused_pid;
+    });
+    if (focused != groups_.end()) {
+      selected_row_ = static_cast<int>(std::distance(groups_.begin(), focused));
+    } else if (groups_.empty()) {
+      selected_row_ = 0;
+    } else {
+      selected_row_ = std::min(selected_row_, static_cast<int>(groups_.size() - 1));
+    }
   }
 
   bool GroupHasEntries(
@@ -573,8 +647,8 @@ class LiveTable {
     }
     BuildGroups();
     std::erase_if(selected_pids_, [this](int pid) {
-      return std::none_of(groups_.begin(), groups_.end(), [pid](const ProcessGroup& group) {
-        return group.pid == pid;
+      return std::none_of(entries_.begin(), entries_.end(), [pid](const SocketEntry& entry) {
+        return entry.pid == pid;
       });
     });
     if (expanded_pid_.has_value() &&
@@ -683,15 +757,15 @@ class LiveTable {
         rows.push_back(hbox({Cell("PORT", 8), Cell("PROTO", 10), Cell("STATE", 14),
                              Cell("FDS", 7)}) |
                        color(CozyRose()));
-        constexpr std::size_t kDetailLimit = 10;
-        for (std::size_t index = 0; index < std::min(group->sockets.size(), kDetailLimit); ++index) {
+        const std::size_t detail_limit = ExpandedDetailLimit();
+        for (std::size_t index = 0; index < std::min(group->sockets.size(), detail_limit); ++index) {
           const SocketEntry& entry = group->sockets[index];
           rows.push_back(hbox({Cell(std::to_string(entry.port), 8),
                                Cell(ToString(entry.protocol), 10), Cell(ToString(entry.state), 14),
                                Cell(std::to_string(entry.fd_count), 7)}));
         }
-        if (group->sockets.size() > kDetailLimit) {
-          rows.push_back(text("... and " + std::to_string(group->sockets.size() - kDetailLimit) +
+        if (group->sockets.size() > detail_limit) {
+          rows.push_back(text("... and " + std::to_string(group->sockets.size() - detail_limit) +
                               " more sockets") |
                          dim);
         }
@@ -708,12 +782,13 @@ class LiveTable {
                                "  socket owners: " + std::to_string(groups_.size()) +
                                "  sockets: " + std::to_string(entries_.size()) +
                                "  selected: " + std::to_string(selected_pids_.size());
-    const std::string controls = "  [up/down] [enter] [space] [s sort] [t theme] [k kill] [?] [q]";
+    const std::string controls = "  [up/down move] [enter ports] [space select]";
+    const std::string secondary_controls = "  [s sort] [t theme] [/ filter] [k kill] [? help] [q quit]";
     const std::string usage_summary = has_snapshot_
-                                          ? "    TOTAL CPU: " + FormatPercent(total_cpu_percent_) + "  " +
+                                          ? "TOTAL CPU: " + FormatPercent(total_cpu_percent_) + "  " +
                                                 Sparkline(cpu_history_) + "  RSS: " +
                                                 FormatRam(total_resident_bytes_, system_memory_bytes_)
-                                          : "    TOTAL CPU: gathering...  PROCESS RSS: gathering...";
+                                          : "TOTAL CPU: gathering...  PROCESS RSS: gathering...";
     Elements footer;
     if (confirm_kill_) {
       footer.push_back(text("Send SIGTERM to " + DescribePids(pending_kill_pids_) + "? [y/n]") |
@@ -725,9 +800,9 @@ class LiveTable {
                        bold | color(CozyTerracotta()));
     }
     if (show_help_) {
-      footer.push_back(text("KEYS  up/down: focus  enter: show ports  s: sort  t: theme  space: select") |
-                       color(CozyRose()));
-      footer.push_back(text("      y/n: confirm or cancel  ?: close help  q: quit") | color(CozyRose()));
+      footer.push_back(text("HELP  [up/down focus] [enter ports] [space select]") | color(CozyRose()));
+      footer.push_back(text("      [s sort] [t theme] [/ filter] [k kill]") | color(CozyRose()));
+      footer.push_back(text("      [y/n confirm] [? close] [q quit]") | color(CozyRose()));
     }
     if (sort_menu_) {
       footer.push_back(text("SORT BY  up/down: choose  enter: apply  esc: cancel") | color(CozyRose()));
@@ -756,14 +831,21 @@ class LiveTable {
         footer.push_back(std::move(option));
       }
     }
+    if (filtering_) {
+      footer.push_back(text("FILTER PROCESS: " + filter_query_ + "_  [enter: apply  esc: clear]") |
+                       color(CozyRose()));
+    } else if (!filter_query_.empty()) {
+      footer.push_back(text("FILTER: " + filter_query_ + "  [/: replace  esc: clear]") | color(CozyRose()));
+    }
     for (const std::string& status : status_lines_) {
       footer.push_back(text(status) | dim);
     }
     footer.push_back(text(summary) | dim);
     footer.push_back(text(counts) | dim);
     footer.push_back(text(controls) | dim);
+    footer.push_back(text(secondary_controls) | dim);
     const char spinner[] = {'|', '/', '-', '\\'};
-    const std::string header = "    porTUI [" + std::string(1, spinner[scan_generation_ % 4]) + "]" +
+    const std::string header = "porTUI [" + std::string(1, spinner[scan_generation_ % 4]) + "]" +
                                "  LIVE PORT MONITOR  last scan: " +
                                std::to_string(has_snapshot_
                                                   ? std::chrono::duration_cast<std::chrono::seconds>(
@@ -802,6 +884,8 @@ class LiveTable {
   bool confirm_kill_ = false;
   bool confirm_force_kill_ = false;
   bool show_help_ = false;
+  bool filtering_ = false;
+  std::string filter_query_;
   bool theme_menu_ = false;
   int theme_menu_row_ = 0;
   SortMode sort_mode_ = SortMode::kName;
