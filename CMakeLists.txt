@@ -7,12 +7,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_library(LIBPROC_LIBRARY proc REQUIRED)
+find_package(Threads REQUIRED)
 
 add_executable(portui
   src/main.cpp
   src/app.cpp
   src/core/debug.cpp
+  src/scanner/scanner_support.cpp
   src/scanner/serial_scanner.cpp
+  src/scanner/parallel_scanner.cpp
 )
 
 target_include_directories(portui
@@ -23,4 +26,5 @@ target_include_directories(portui
 target_link_libraries(portui
   PRIVATE
     ${LIBPROC_LIBRARY}
+    Threads::Threads
 )

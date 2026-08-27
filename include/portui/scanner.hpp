@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <memory>
 
 #include "portui/snapshot.hpp"
@@ -14,5 +15,6 @@ class Scanner {
 };
 
 std::unique_ptr<Scanner> CreateSerialScanner();
+std::unique_ptr<Scanner> CreateParallelScanner(std::size_t worker_count = 0);
 
 }  // namespace portui
